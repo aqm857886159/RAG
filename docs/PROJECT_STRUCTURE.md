@@ -35,18 +35,20 @@ RAG项目实战/
 │   ├── 📋 PROJECT_STRUCTURE.md     # 项目结构说明（本文件）
 │   ├── 🚀 QUICK_START.md           # 快速开始指南
 │   ├── 🔧 API_DOCUMENTATION.md     # API文档
-│   └── 📊 EVALUATION_GUIDE.md      # 评估指南
+│   ├── 📊 EVALUATION_GUIDE.md       # 评估指南
+│   ├── 📊 PROJECT_SUMMARY.md       # 项目总结报告
+│   └── 📋 RELEASE_NOTES.md         # 发布说明
 │
 ├── 📁 scripts/                      # 工具脚本
 │   ├── 🏃 run_app.py               # 应用启动脚本
 │   ├── 🔧 run_fixed_app.py         # 修复版启动脚本
 │   └── 📱 app.py                   # 备用启动脚本
 │
-├── 📁 evaluation/                   # 评估相关
-│   ├── 📊 comprehensive_rag_evaluation.py  # 综合评估脚本
+├── 📁 evaluation/                   # 评估系统和结果
+│   ├── 📊 comprehensive_rag_evaluation.py  # 全面RAG评估脚本
 │   ├── 📈 evaluation_results/      # 评估结果
 │   └── 📋 evaluation_data/         # 评估数据
-│
+│   └── scripts/                    # 评估相关脚本
 ├── 📁 data/                         # 数据目录
 │   ├── 📄 input/                   # 输入文档
 │   └── 📊 samples/                 # 示例数据

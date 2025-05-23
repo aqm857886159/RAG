@@ -293,9 +293,9 @@ RAG_CONFIG = {
 
 - 📖 [快速开始指南](docs/QUICK_START.md) - 5分钟上手教程
 - 🏗️ [项目结构说明](docs/PROJECT_STRUCTURE.md) - 详细架构说明
-- 📊 [系统评估报告](rag_evaluation_summary.md) - 性能评估详情
-- 🔧 [API文档](docs/API_DOCUMENTATION.md) - 接口使用说明
-- 📋 [发布说明](RELEASE_NOTES.md) - 版本更新记录
+- 📊 [系统评估报告](evaluation/rag_evaluation_summary.md) - 性能评估详情
+- 📖 [技术总结](docs/PROJECT_SUMMARY.md) - 完整技术文档
+- 📋 [发布说明](docs/RELEASE_NOTES.md) - 版本更新记录
 
 ## 🤝 贡献指南
 
