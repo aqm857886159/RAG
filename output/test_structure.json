@@ -1,0 +1,23 @@
+{
+  "chunks": [
+    {
+      "content": "这是第一个文本块的内容",
+      "metadata": {
+        "source": "test_document.docx",
+        "chunk_id": 1
+      }
+    },
+    {
+      "content": "这是第二个文本块的内容",
+      "metadata": {
+        "source": "test_document.docx",
+        "chunk_id": 2
+      }
+    }
+  ],
+  "metadata": {
+    "total_chunks": 2,
+    "source_file": "test_document.docx",
+    "processing_time": "2024-01-01 12:00:00"
+  }
+}
