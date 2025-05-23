@@ -173,50 +173,193 @@ class DocumentConverter:
         
         # 为每个文本块生成问答对
         for i, chunk in enumerate(chunks):
-            if i > 10:  # 限制处理的块数，避免生成过多
+            if i > 5:  # 限制处理的块数，避免生成过多
                 break
                 
             content = chunk.page_content
-            if len(content.strip()) < 50:  # 跳过内容太少的块
+            if len(content.strip()) < 100:  # 跳过内容太少的块
                 continue
             
-            # 构建提示词
+            # 构建更明确的提示词
             prompt = f"""
-            请根据以下文本内容生成{qa_per_chunk}个问答对，这些问答对应该能够测试读者对文本内容的理解。
-            每个问题必须可以从文本中找到明确的答案。问答对的形式应为：
-            [问题1]
-            [答案1]
-            [问题2]
-            [答案2]
-            ...以此类推
-            
-            文本内容:
-            {content}
-            """
+请根据以下文本内容生成{qa_per_chunk}个问答对。请严格按照以下JSON格式回复：
+
+```json
+[
+    {{{{
+        "question": "问题1的内容",
+        "answer": "答案1的内容"
+    }}}},
+    {{{{
+        "question": "问题2的内容", 
+        "answer": "答案2的内容"
+    }}}},
+    {{{{
+        "question": "问题3的内容",
+        "answer": "答案3的内容"  
+    }}}}
+]
+```
+
+要求：
+1. 问题必须基于文本内容，答案必须可以从文本中找到
+2. 问题要有针对性，测试对文本的理解
+3. 答案要准确、简洁
+4. 必须生成{qa_per_chunk}个问答对
+
+文本内容：
+{content}
+
+请回复JSON格式的问答对：
+"""
             
             try:
                 # 调用LLM生成问答对
                 response = self.generator.llm(prompt)
+                logger.debug(f"LLM响应: {response[:200]}...")
                 
-                # 解析响应
-                qa_text = response.strip().split('\n')
+                # 解析JSON响应
+                parsed_qa_pairs = self._parse_qa_response(response)
                 
-                # 处理QA对，格式应该是交替的问题和答案
-                for j in range(0, len(qa_text) - 1, 2):
-                    if j + 1 < len(qa_text):
-                        question = qa_text[j].replace('[问题', '').replace(']', '').strip()
-                        answer = qa_text[j+1].replace('[答案', '').replace(']', '').strip()
+                # 添加到结果列表
+                for qa_dict in parsed_qa_pairs:
+                    try:
+                        qa_pair = QAPair(
+                            question=qa_dict["question"].strip(),
+                            answer=qa_dict["answer"].strip()
+                        )
+                        qa_pairs.append(qa_pair)
+                        logger.debug(f"成功创建问答对: Q: {qa_pair.question[:50]}...")
+                    except Exception as e:
+                        logger.warning(f"创建QAPair对象失败: {str(e)}")
                         
-                        # 过滤出有效的问答对
-                        if question and answer and len(question) > 5 and len(answer) > 5:
-                            qa_pairs.append(QAPair(
-                                question=question,
-                                answer=answer
-                            ))
             except Exception as e:
                 logger.error(f"生成问答对时出错: {str(e)}")
+                continue
         
+        logger.info(f"总共生成了 {len(qa_pairs)} 个问答对")
         return qa_pairs
+    
+    def _parse_qa_response(self, response: str) -> List[Dict[str, str]]:
+        """
+        解析LLM响应中的问答对
+        
+        Args:
+            response: LLM的响应文本
+            
+        Returns:
+            问答对字典列表
+        """
+        qa_pairs = []
+        
+        try:
+            # 方法1: 尝试解析JSON格式
+            import json
+            import re
+            
+            # 提取JSON部分（在```json和```之间，或者在[和]之间）
+            json_match = re.search(r'```json\s*(\[.*?\])\s*```', response, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # 直接查找JSON数组
+                json_match = re.search(r'\[.*?\]', response, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+                else:
+                    json_str = None
+            
+            if json_str:
+                parsed_data = json.loads(json_str)
+                if isinstance(parsed_data, list):
+                    for item in parsed_data:
+                        if isinstance(item, dict) and "question" in item and "answer" in item:
+                            qa_pairs.append({
+                                "question": str(item["question"]).strip(),
+                                "answer": str(item["answer"]).strip()
+                            })
+                    
+                    logger.debug(f"JSON解析成功，提取了 {len(qa_pairs)} 个问答对")
+                    return qa_pairs
+            
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON解析失败: {str(e)}")
+        except Exception as e:
+            logger.warning(f"JSON解析出错: {str(e)}")
+        
+        # 方法2: 尝试正则表达式匹配结构化格式
+        try:
+            # 匹配各种可能的格式
+            patterns = [
+                # Q: ... A: ...格式
+                r'Q[：:]?\s*(.+?)\s*A[：:]?\s*(.+?)(?=Q[：:]|$)',
+                # 问题: ... 答案: ...格式
+                r'问题[：:]?\s*(.+?)\s*答案[：:]?\s*(.+?)(?=问题[：:]|$)',
+                # 1. 问题... 答案...格式
+                r'\d+\.\s*问题[：:]?\s*(.+?)\s*答案[：:]?\s*(.+?)(?=\d+\.|$)',
+                # **问题**... **答案**...格式
+                r'\*\*问题\*\*[：:]?\s*(.+?)\s*\*\*答案\*\*[：:]?\s*(.+?)(?=\*\*问题\*\*|$)',
+            ]
+            
+            for pattern in patterns:
+                matches = re.findall(pattern, response, re.DOTALL | re.IGNORECASE)
+                if matches:
+                    for question, answer in matches:
+                        question = question.strip().replace('\n', ' ')
+                        answer = answer.strip().replace('\n', ' ')
+                        if len(question) > 5 and len(answer) > 5:
+                            qa_pairs.append({
+                                "question": question,
+                                "answer": answer
+                            })
+                    
+                    if qa_pairs:
+                        logger.debug(f"正则表达式解析成功，提取了 {len(qa_pairs)} 个问答对")
+                        return qa_pairs
+            
+        except Exception as e:
+            logger.warning(f"正则表达式解析出错: {str(e)}")
+        
+        # 方法3: 简单的文本分割方法
+        try:
+            lines = [line.strip() for line in response.split('\n') if line.strip()]
+            
+            current_question = None
+            for line in lines:
+                # 跳过格式化字符
+                if line in ['```json', '```', '[', ']', '{', '}'] or line.startswith('```'):
+                    continue
+                
+                # 识别问题行
+                if any(keyword in line for keyword in ['问题', 'question', 'Q:', '问：', '?', '？']):
+                    # 清理问题文本
+                    question = re.sub(r'^[^\w\u4e00-\u9fff]*', '', line)
+                    question = re.sub(r'问题[：:]?|question[：:]?|Q[：:]?', '', question, flags=re.IGNORECASE).strip()
+                    if len(question) > 5:
+                        current_question = question
+                
+                # 识别答案行
+                elif current_question and any(keyword in line for keyword in ['答案', 'answer', 'A:', '答：']):
+                    # 清理答案文本
+                    answer = re.sub(r'^[^\w\u4e00-\u9fff]*', '', line)
+                    answer = re.sub(r'答案[：:]?|answer[：:]?|A[：:]?', '', answer, flags=re.IGNORECASE).strip()
+                    if len(answer) > 5:
+                        qa_pairs.append({
+                            "question": current_question,
+                            "answer": answer
+                        })
+                        current_question = None
+            
+            if qa_pairs:
+                logger.debug(f"文本分割解析成功，提取了 {len(qa_pairs)} 个问答对")
+                return qa_pairs
+                
+        except Exception as e:
+            logger.warning(f"文本分割解析出错: {str(e)}")
+        
+        # 如果所有方法都失败，记录原始响应并返回空列表
+        logger.error(f"无法解析问答对，原始响应: {response[:500]}...")
+        return []
     
     def _extract_tables_from_docs(self, docs: List[Document]) -> List[Dict[str, Any]]:
         """

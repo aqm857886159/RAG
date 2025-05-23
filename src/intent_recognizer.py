@@ -2,20 +2,16 @@
 # -*- coding: utf-8 -*-
 """
 意图识别模块
-基于OpenPrompt框架实现用户查询意图分类
+基于LLM API实现用户查询意图分类
 """
 
 import os
 import logging
 from typing import Dict, List, Optional, Union, Any
-import torch
-from pathlib import Path
+import json
 
-# 导入OpenPrompt相关模块
-from openprompt.data_utils import InputExample
-from openprompt import PromptDataLoader, PromptForClassification
-from openprompt.plms import load_plm
-from openprompt.prompts import ManualTemplate, ManualVerbalizer
+# 导入LLM生成器
+from generator import get_generator
 
 # 配置日志
 logging.basicConfig(
@@ -39,53 +35,23 @@ class IntentRecognizer:
         "其他"         # 其他类型
     ]
     
-    def __init__(self, model_name: str = "bert-base-chinese", device: str = None):
+    def __init__(self, llm_provider: str = "deepseek"):
         """
         初始化意图识别器
         
         Args:
-            model_name: 使用的预训练模型名称
-            device: 运行设备，默认为自动选择
+            llm_provider: LLM提供商，支持openai和deepseek
         """
-        self.model_name = model_name
-        self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
+        self.llm_provider = llm_provider
         
-        # 加载预训练模型
-        logger.info(f"加载预训练模型: {model_name}")
-        self.plm, self.tokenizer, self.model_config, self.WrapperClass = load_plm("bert", model_name)
-        
-        # 定义模板
-        self.template = ManualTemplate(
-            text="用户问题: \"{'placeholder':'text_a'}\" \n这个问题的意图类型是什么? {'mask'}",
-            tokenizer=self.tokenizer,
-        )
-        
-        # 定义映射器
-        self.verbalizer = ManualVerbalizer(
-            classes=self.INTENT_CLASSES,
-            label_words={
-                "信息查询": ["查询", "了解", "是什么", "告诉我"],
-                "比较类问题": ["比较", "区别", "不同", "差异", "优劣"],
-                "深度解释": ["解释", "详细说明", "阐述", "为什么"],
-                "推理分析": ["分析", "推理", "推断", "判断", "预测"],
-                "操作指南": ["如何", "怎么样", "操作", "使用", "步骤"],
-                "个人观点": ["认为", "建议", "意见", "看法", "推荐"],
-                "闲聊": ["你好", "聊天", "问候", "闲聊", "感谢"],
-                "其他": ["其他", "未知", "不确定"]
-            },
-            tokenizer=self.tokenizer,
-        )
-        
-        # 构建意图识别模型
-        self.model = PromptForClassification(
-            template=self.template,
-            plm=self.plm,
-            verbalizer=self.verbalizer,
-        )
-        self.model.to(self.device)
-        self.model.eval()
-        
-        logger.info("意图识别器初始化完成")
+        try:
+            # 初始化LLM生成器
+            self.generator = get_generator(provider=llm_provider)
+            logger.info(f"意图识别器初始化完成，使用 {llm_provider} 提供商")
+        except Exception as e:
+            logger.error(f"初始化LLM生成器失败: {str(e)}")
+            self.generator = None
+            raise
     
     def recognize_intent(self, query: str) -> Dict[str, Any]:
         """
@@ -97,41 +63,131 @@ class IntentRecognizer:
         Returns:
             包含意图识别结果的字典
         """
-        # 创建输入示例
-        input_example = InputExample(text_a=query, guid=0)
+        if self.generator is None:
+            raise RuntimeError("LLM生成器未初始化")
         
-        # 创建数据加载器
-        data_loader = PromptDataLoader(
-            dataset=[input_example],
-            tokenizer=self.tokenizer,
-            template=self.template,
-            tokenizer_wrapper_class=self.WrapperClass,
-            max_seq_length=512,
-            batch_size=1,
-        )
+        # 构建意图识别提示词
+        prompt = f"""
+请分析以下用户查询的意图类型，从给定的类别中选择最合适的一个。
+
+用户查询: "{query}"
+
+意图类别:
+1. 信息查询 - 查询事实信息，如"什么是机器学习？"
+2. 比较类问题 - 比较多个实体的异同，如"深度学习和机器学习的区别"
+3. 深度解释 - 请求详细解释概念，如"详细解释神经网络的工作原理"
+4. 推理分析 - 需要逻辑推理的问题，如"为什么深度学习在图像识别中效果更好？"
+5. 操作指南 - 如何操作/执行某事，如"如何训练一个神经网络模型？"
+6. 个人观点 - 请求观点或建议，如"你认为哪种算法更适合这个场景？"
+7. 闲聊 - 非信息检索类闲聊，如"你好"、"谢谢"
+8. 其他 - 其他类型
+
+请回复JSON格式:
+{{
+    "intent": "意图类别名称",
+    "confidence": 0.9,
+    "reasoning": "选择这个意图的原因"
+}}
+"""
         
-        # 进行预测
-        with torch.no_grad():
-            for batch in data_loader:
-                batch = {key: value.to(self.device) for key, value in batch.items()}
-                logits = self.model(batch)
-                preds = torch.softmax(logits, dim=-1)
-                confidence, pred_id = torch.max(preds, dim=-1)
-                intent = self.INTENT_CLASSES[pred_id.item()]
-                confidence = confidence.item()
+        try:
+            # 调用LLM进行意图识别
+            response = self.generator.llm(prompt)
+            
+            # 解析JSON响应
+            try:
+                # 尝试从响应中提取JSON部分
+                if '{' in response and '}' in response:
+                    json_start = response.find('{')
+                    json_end = response.rfind('}') + 1
+                    json_str = response[json_start:json_end]
+                    result = json.loads(json_str)
+                else:
+                    # 如果没有JSON格式，使用默认解析
+                    result = self._parse_text_response(response, query)
+                
+                # 验证和标准化结果
+                intent = result.get("intent", "其他")
+                if intent not in self.INTENT_CLASSES:
+                    intent = "其他"
+                
+                confidence = float(result.get("confidence", 0.8))
+                if not 0 <= confidence <= 1:
+                    confidence = 0.8
+                
+                reasoning = result.get("reasoning", "基于文本特征判断")
+                
+                final_result = {
+                    "intent": intent,
+                    "confidence": confidence,
+                    "reasoning": reasoning,
+                    "query": query
+                }
+                
+                logger.info(f"意图识别成功: '{query}' -> '{intent}' (置信度: {confidence:.3f})")
+                return final_result
+                
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON解析失败，使用文本解析: {str(e)}")
+                return self._parse_text_response(response, query)
+                
+        except Exception as e:
+            logger.error(f"意图识别失败: {str(e)}")
+            # 返回默认结果
+            return {
+                "intent": "其他",
+                "confidence": 0.5,
+                "reasoning": f"识别过程出错: {str(e)}",
+                "query": query
+            }
+    
+    def _parse_text_response(self, response: str, query: str) -> Dict[str, Any]:
+        """
+        解析文本响应，当JSON解析失败时使用
         
-        # 返回意图和置信度
-        result = {
+        Args:
+            response: LLM的文本响应
+            query: 原始查询
+            
+        Returns:
+            意图识别结果
+        """
+        # 简单的关键词匹配逻辑
+        response_lower = response.lower()
+        query_lower = query.lower()
+        
+        # 基于关键词判断意图
+        if any(keyword in query_lower for keyword in ["什么是", "是什么", "定义", "含义"]):
+            intent = "信息查询"
+            confidence = 0.8
+        elif any(keyword in query_lower for keyword in ["区别", "不同", "差异", "比较", "对比"]):
+            intent = "比较类问题"
+            confidence = 0.8
+        elif any(keyword in query_lower for keyword in ["为什么", "原因", "解释", "详细", "深入"]):
+            intent = "深度解释"
+            confidence = 0.7
+        elif any(keyword in query_lower for keyword in ["分析", "推断", "判断", "预测", "评估"]):
+            intent = "推理分析"
+            confidence = 0.7
+        elif any(keyword in query_lower for keyword in ["如何", "怎么", "步骤", "方法", "操作"]):
+            intent = "操作指南"
+            confidence = 0.8
+        elif any(keyword in query_lower for keyword in ["建议", "推荐", "认为", "看法", "意见"]):
+            intent = "个人观点"
+            confidence = 0.7
+        elif any(keyword in query_lower for keyword in ["你好", "谢谢", "再见", "聊天"]):
+            intent = "闲聊"
+            confidence = 0.9
+        else:
+            intent = "其他"
+            confidence = 0.6
+        
+        return {
             "intent": intent,
             "confidence": confidence,
-            "all_intents": {
-                self.INTENT_CLASSES[i]: preds[0][i].item()
-                for i in range(len(self.INTENT_CLASSES))
-            }
+            "reasoning": f"基于关键词匹配判断: {intent}",
+            "query": query
         }
-        
-        logger.info(f"查询: '{query}' -> 意图: '{intent}' (置信度: {confidence:.4f})")
-        return result
     
     def get_retrieval_strategy(self, intent: str) -> Dict[str, Any]:
         """
@@ -149,49 +205,57 @@ class IntentRecognizer:
                 "top_k": 5,
                 "vector_weight": 0.7,
                 "bm25_weight": 0.3,
-                "use_reranker": True
+                "use_reranker": True,
+                "temperature": 0.7
             },
             "比较类问题": {
                 "top_k": 8,  # 比较类问题需要更多文档
                 "vector_weight": 0.6,
                 "bm25_weight": 0.4,
-                "use_reranker": True
+                "use_reranker": True,
+                "temperature": 0.6
             },
             "深度解释": {
                 "top_k": 6,
                 "vector_weight": 0.8,  # 更注重语义
                 "bm25_weight": 0.2,
-                "use_reranker": True
+                "use_reranker": True,
+                "temperature": 0.5
             },
             "推理分析": {
                 "top_k": 7,
                 "vector_weight": 0.75,
                 "bm25_weight": 0.25,
-                "use_reranker": True
+                "use_reranker": True,
+                "temperature": 0.6
             },
             "操作指南": {
                 "top_k": 4,
                 "vector_weight": 0.7,
                 "bm25_weight": 0.3,
-                "use_reranker": True
+                "use_reranker": True,
+                "temperature": 0.4
             },
             "个人观点": {
                 "top_k": 6,
                 "vector_weight": 0.8,
                 "bm25_weight": 0.2,
-                "use_reranker": False  # 个人观点可能不需要重排序
+                "use_reranker": False,  # 个人观点可能不需要重排序
+                "temperature": 0.8
             },
             "闲聊": {
                 "top_k": 2,  # 闲聊不需要太多文档
                 "vector_weight": 0.9,
                 "bm25_weight": 0.1,
-                "use_reranker": False
+                "use_reranker": False,
+                "temperature": 0.9
             },
             "其他": {
                 "top_k": 5,
                 "vector_weight": 0.7,
                 "bm25_weight": 0.3,
-                "use_reranker": True
+                "use_reranker": True,
+                "temperature": 0.7
             }
         }
         
@@ -199,77 +263,95 @@ class IntentRecognizer:
     
     def get_prompt_template(self, intent: str) -> str:
         """
-        根据意图获取定制的提示模板
+        根据意图获取对应的提示词模板
         
         Args:
             intent: 识别的意图类型
             
         Returns:
-            适合该意图的提示模板
+            提示词模板字符串
         """
-        # 针对不同意图的提示模板
         templates = {
-            "信息查询": """请基于以下参考资料回答用户的信息查询。只使用参考资料中的信息，如果参考资料不包含相关信息，请说明无法从参考资料中找到答案。
-参考资料:
+            "信息查询": """基于以下相关文档内容，准确回答用户的问题。请提供具体、事实性的信息。
+
+相关文档：
 {context}
 
-用户查询: {query}
-回答:""",
+用户问题：{question}
 
-            "比较类问题": """请根据以下参考资料，详细比较用户提问中涉及的对象或概念。对于每个比较点，请分别说明异同点，并使用表格或清晰的结构呈现。
-参考资料:
+请回答：""",
+            
+            "比较类问题": """基于以下相关文档内容，比较分析用户询问的内容。请从多个角度进行对比，突出关键差异和相似点。
+
+相关文档：
 {context}
 
-用户的比较问题: {query}
-比较分析:""",
+用户问题：{question}
 
-            "深度解释": """请根据以下参考资料，对用户询问的概念或现象进行深入详细的解释。解释应包括核心定义、工作原理、相关背景和重要细节。
-参考资料:
+请进行详细比较分析：""",
+            
+            "深度解释": """基于以下相关文档内容，深入详细地解释用户询问的概念或现象。请提供全面的解释，包括原理、机制、应用等方面。
+
+相关文档：
 {context}
 
-用户请求解释: {query}
-详细解释:""",
+用户问题：{question}
 
-            "推理分析": """请根据以下参考资料，对用户的问题进行逻辑推理和分析。需要综合考虑多个因素，并给出合理的推断过程和结论。
-参考资料:
+请详细解释：""",
+            
+            "推理分析": """基于以下相关文档内容，运用逻辑推理分析用户的问题。请提供推理过程和结论。
+
+相关文档：
 {context}
 
-需要推理的问题: {query}
-推理分析:""",
+用户问题：{question}
 
-            "操作指南": """请根据以下参考资料，提供清晰、具体、分步骤的操作指南，回答用户关于如何执行特定任务的问题。
-参考资料:
+请进行推理分析：""",
+            
+            "操作指南": """基于以下相关文档内容，提供具体的操作指导。请给出清晰的步骤和注意事项。
+
+相关文档：
 {context}
 
-用户操作问题: {query}
-操作指南:""",
+用户问题：{question}
 
-            "个人观点": """请根据以下参考资料，提供一个平衡、有见地的观点或建议。注意既要基于事实，也要考虑不同角度的看法。
-参考资料:
+请提供操作指南：""",
+            
+            "个人观点": """基于以下相关文档内容，结合专业知识提供建议或观点。请给出有见地的分析和建议。
+
+相关文档：
 {context}
 
-用户征求意见: {query}
-建议与观点:""",
+用户问题：{question}
 
-            "闲聊": """用户似乎在进行闲聊。请给予友好、有趣的回应，可以参考以下信息，但不必严格受限。
-可参考信息:
+请提供建议和观点：""",
+            
+            "闲聊": """请以友好、自然的方式回应用户。
+
+用户说：{question}
+
+请回应：""",
+            
+            "其他": """基于以下相关文档内容，回答用户的问题。
+
+相关文档：
 {context}
 
-用户闲聊: {query}
-回应:"""
+用户问题：{question}
+
+请回答："""
         }
         
-        return templates.get(intent, templates["信息查询"])
+        return templates.get(intent, templates["其他"])
 
-
-def get_intent_recognizer(model_name: str = "bert-base-chinese") -> IntentRecognizer:
+def get_intent_recognizer(llm_provider: str = "deepseek") -> IntentRecognizer:
     """
     获取意图识别器实例
     
     Args:
-        model_name: 使用的预训练模型名称
+        llm_provider: LLM提供商
         
     Returns:
-        意图识别器实例
+        IntentRecognizer实例
     """
-    return IntentRecognizer(model_name=model_name) 
+    return IntentRecognizer(llm_provider=llm_provider) 
